@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { SummaryCard } from "@/components/SummaryCard";
 import { ExpenseTable } from "@/components/ExpenseTable";
@@ -7,6 +7,9 @@ import { useToast } from "@/hooks/use-toast";
 import { Upload, Plus, FileSpreadsheet } from "lucide-react";
 import { Expense, ExpenseSummary } from "@/types/expense";
 import { extractReceiptData, OCRResult } from "@/services/ocrService";
+import { db, storage } from "@/lib/firebase";
+import { collection, addDoc, query, orderBy, onSnapshot, Timestamp } from "firebase/firestore";
+import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 
 const Index = () => {
   const { toast } = useToast();
@@ -14,58 +17,51 @@ const Index = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isProcessingUpload, setIsProcessingUpload] = useState(false);
   const [ocrData, setOcrData] = useState<OCRResult | null>(null);
+  const [expenses, setExpenses] = useState<Expense[]>([]);
 
-  // Mock data - replace with Firebase queries
-  const [summary] = useState<ExpenseSummary>({
-    draft: 5467,
-    submitted: 33674,
-    approved: 500,
-  });
+  // Load expenses from Firebase in real-time
+  useEffect(() => {
+    const q = query(collection(db, "expenses"), orderBy("createdAt", "desc"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const expenseData: Expense[] = snapshot.docs.map((doc) => {
+        const data = doc.data();
+        return {
+          id: doc.id,
+          employee: data.employee,
+          description: data.description,
+          date: data.date,
+          category: data.category,
+          paidBy: data.paidBy,
+          remarks: data.remarks || "",
+          amount: data.amount,
+          currency: data.currency,
+          status: data.status,
+          createdAt: data.createdAt instanceof Timestamp 
+            ? data.createdAt.toDate().toISOString()
+            : data.createdAt,
+          updatedAt: data.updatedAt instanceof Timestamp 
+            ? data.updatedAt.toDate().toISOString()
+            : data.updatedAt,
+        };
+      });
+      setExpenses(expenseData);
+    });
 
-  const [expenses] = useState<Expense[]>([
-    {
-      id: "1",
-      employee: "Sarah",
-      description: "Restaurant bill",
-      date: "2025-10-04",
-      category: "Food",
-      paidBy: "Sarah",
-      remarks: "None",
-      amount: 5000,
-      currency: "INR",
-      status: "draft",
-      createdAt: "2025-10-04",
-      updatedAt: "2025-10-04",
-    },
-    {
-      id: "2",
-      employee: "Sarah",
-      description: "Client gift",
-      date: "2025-10-02",
-      category: "Gifts",
-      paidBy: "Company Card",
-      remarks: "VIP Client",
-      amount: 15000,
-      currency: "INR",
-      status: "submitted",
-      createdAt: "2025-10-02",
-      updatedAt: "2025-10-02",
-    },
-    {
-      id: "3",
-      employee: "Sarah",
-      description: "Flight Ticket",
-      date: "2025-10-01",
-      category: "Travel",
-      paidBy: "Sarah",
-      remarks: "Trip to Delhi",
-      amount: 25000,
-      currency: "INR",
-      status: "approved",
-      createdAt: "2025-10-01",
-      updatedAt: "2025-10-01",
-    },
-  ]);
+    return () => unsubscribe();
+  }, []);
+
+  // Calculate summary from expenses
+  const summary: ExpenseSummary = {
+    draft: expenses
+      .filter(e => e.status === "draft")
+      .reduce((sum, e) => sum + e.amount, 0),
+    submitted: expenses
+      .filter(e => e.status === "submitted")
+      .reduce((sum, e) => sum + e.amount, 0),
+    approved: expenses
+      .filter(e => e.status === "approved")
+      .reduce((sum, e) => sum + e.amount, 0),
+  };
 
   const handleUploadClick = () => {
     fileInputRef.current?.click();
@@ -110,14 +106,50 @@ const Index = () => {
     setIsModalOpen(true);
   };
 
-  const handleSubmitExpense = (data: any) => {
+  const handleSubmitExpense = async (data: any) => {
     console.log("Submitting expense:", data);
-    // TODO: Save to Firebase
-    toast({
-      title: "Expense submitted!",
-      description: "Your expense has been submitted for approval.",
-    });
-    setIsModalOpen(false);
+    
+    try {
+      let receiptUrl = null;
+
+      // Upload receipt file if exists
+      if (data.receiptFile) {
+        const fileName = `${Date.now()}_${data.receiptFile.name}`;
+        const storageRef = ref(storage, `receipts/${fileName}`);
+        await uploadBytes(storageRef, data.receiptFile);
+        receiptUrl = await getDownloadURL(storageRef);
+      }
+
+      // Save to Firestore
+      await addDoc(collection(db, "expenses"), {
+        employee: "Sarah", // TODO: Get from auth context
+        description: data.description,
+        date: data.expenseDate,
+        category: data.category,
+        paidBy: data.paidBy,
+        amount: parseFloat(data.amount),
+        currency: data.currency,
+        status: "draft",
+        remarks: data.remarks || "",
+        receiptUrl,
+        createdAt: Timestamp.now(),
+        updatedAt: Timestamp.now(),
+      });
+
+      toast({
+        title: "Expense submitted!",
+        description: "Your expense has been saved successfully.",
+      });
+      setIsModalOpen(false);
+      setOcrData(null);
+    } catch (error) {
+      console.error("Error submitting expense:", error);
+      toast({
+        title: "Error",
+        description: "Failed to submit expense. Please try again.",
+        variant: "destructive",
+      });
+    }
   };
 
   return (
